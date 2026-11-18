@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Carta">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-180.png">
+<title>Carta Assinada</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body {
+    position: fixed; inset: 0; touch-action: none; overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  }
+  #cam { position: fixed; left: 0; top: 0; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
+  #stage { position: fixed; inset: 0; overflow: hidden; }
+
+  #card {
+    position: absolute; left: 50%; top: 50%;
+    width: var(--cw); height: var(--ch);
+    margin-left: calc(var(--cw) / -2); margin-top: calc(var(--ch) / -2);
+    perspective: 1800px; display: none; will-change: transform;
+  }
+  #flipper {
+    position: absolute; inset: 0; transform-style: preserve-3d;
+    transform: rotateY(180deg); transition: transform .8s cubic-bezier(.35,.05,.2,1);
+  }
+  #card.face #flipper { transform: rotateY(0deg); }
+  .half { position: absolute; left: 0; width: 100%; height: 50%; transform-style: preserve-3d; }
+  .half.top { top: 0; height: calc(50% + 1px); }
+  .half.bottom { top: 50%; transform-origin: 50% 0; transition: transform .55s cubic-bezier(.45,0,.3,1); }
+  #card.fold1 .half.bottom { transform: rotateX(-179deg); }
+  .q { position: absolute; top: 0; width: 50%; height: 100%; transform-style: preserve-3d; }
+  .q.l { left: 0; width: calc(50% + 1px); }
+  .q.r { left: 50%; transform-origin: 0 50%; transition: transform .55s cubic-bezier(.45,0,.3,1); }
+  #card.fold2 .half.top .q.r { transform: rotateY(179deg); }
+  #card.fold2 .half.bottom .q.r { transform: rotateY(-179deg); }
+  .f, .b {
+    position: absolute; inset: 0; background-size: var(--cw) var(--ch); background-repeat: no-repeat;
+    backface-visibility: hidden; -webkit-backface-visibility: hidden;
+  }
+  .b { transform: rotateY(180deg); }
+  #card.notrans, #card.notrans * { transition: none !important; }
+
+  #packet {
+    position: absolute; display: none; background-size: 200% 200%; background-position: 0 0;
+    background-repeat: no-repeat; border-top-left-radius: var(--r); will-change: transform;
+    box-shadow: 1px 1px 0 #d9d9d9, 2px 2px 0 #c4c4c4, 3px 3px 0 #b0b0b0;
+  }
+  #packet::after {
+    content: ''; position: absolute; inset: 0; border-top-left-radius: inherit;
+    background: linear-gradient(to right, transparent 90%, rgba(0,0,0,.10)),
+                linear-gradient(to bottom, transparent 90%, rgba(0,0,0,.10));
+  }
+
+  #dot {
+    position: fixed; right: 16px; top: calc(env(safe-area-inset-top, 0px) + 10px);
+    width: 7px; height: 7px; border-radius: 50%; background: transparent; pointer-events: none;
+  }
+  #dot.seek { background: #262626; }
+  #dot.ok { background: #2fd158; }
+  #lbl {
+    position: fixed; right: 30px; top: calc(env(safe-area-inset-top, 0px) + 5px);
+    color: #4a4a4a; font-size: 12px; pointer-events: none;
+  }
+  #hint {
+    position: fixed; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom, 0px) + 30px);
+    text-align: center; color: #3a3a3a; font-size: 13px; pointer-events: none;
+  }
+  #hap { position: fixed; left: -100px; top: -100px; opacity: 0; pointer-events: none; }
+
+  #dbg { position: fixed; left: 8px; bottom: calc(env(safe-area-inset-bottom, 0px) + 8px); display: none; pointer-events: none; }
+  #dbg canvas { width: 135px; border: 1px solid #333; display: block; }
+  #dbg div { color: #0f0; font: 11px monospace; margin-top: 3px; text-shadow: 0 0 2px #000; }
+</style>
+</head>
+<body>
+<video id="cam" playsinline muted autoplay></video>
+
+<div id="stage">
+  <div id="card">
+    <div id="flipper">
+      <div class="half top">
+        <div class="q l"><div class="f"></div><div class="b"></div></div>
+        <div class="q r"><div class="f"></div><div class="b"></div></div>
+      </div>
+      <div class="half bottom">
+        <div class="q l"><div class="f"></div><div class="b"></div></div>
+        <div class="q r"><div class="f"></div><div class="b"></div></div>
+      </div>
+    </div>
+  </div>
+  <div id="packet"></div>
+</div>
+
+<div id="dot"></div>
+<div id="lbl"></div>
+<div id="hint"></div>
+<label id="hap"><input type="checkbox" switch></label>
+<div id="dbg"><canvas id="dbgc"></canvas><div id="dbgt"></div></div>
+
+<script src="cartas-data.js"></script>
+<script src="engine.js"></script>
+<script src="cards.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
