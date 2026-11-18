@@ -1,5 +1,5 @@
-const CACHE = 'carta-assinada-v1';
-const FILES = ['./', 'index.html', 'app.js', 'engine.js', 'cards.js', 'cartas-data.js', 'manifest.json', 'icon-180.png', 'icon-512.png'];
+const CACHE = 'carta-assinada-v2';
+const FILES = ['./', 'index.html', 'app.js', 'engine.js', 'cards.js', 'capture.js', 'cartas-data.js', 'manifest.json', 'icon-180.png', 'icon-512.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)));
   self.skipWaiting();

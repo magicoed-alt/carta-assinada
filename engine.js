@@ -205,11 +205,15 @@ const Engine = (() => {
     let pr = 0, pb = 0, pk = 0;
     for (let i = 0; i < n; i++) if (L[i] >= top) { const l = L[i] || 1; pr += d[i * 4] / l; pb += d[i * 4 + 2] / l; pk++; }
     pr /= pk || 1; pb /= pk || 1;
+    // cor média num raio de 2 px (o ruído de cor da câmera no escuro é grande pixel a pixel)
+    const Rc = new Float32Array(n), Gc = new Float32Array(n), Bc = new Float32Array(n);
+    for (let i = 0; i < n; i++) { Rc[i] = d[i * 4]; Gc[i] = d[i * 4 + 1]; Bc[i] = d[i * 4 + 2]; }
+    const sR = boxSum(integral(Rc, w, h), w, h, 2), sG = boxSum(integral(Gc, w, h), w, h, 2), sB = boxSum(integral(Bc, w, h), w, h, 2);
     const on = new Uint8Array(n);
     for (let i = 0; i < n; i++) {
       if (L[i] <= thr) continue;
-      const l = L[i];
-      if (Math.abs(d[i * 4] / l - pr) + Math.abs(d[i * 4 + 2] / l - pb) < 0.22) on[i] = 1;
+      const l = 0.299 * sR[i] + 0.587 * sG[i] + 0.114 * sB[i] || 1;
+      if (Math.abs(sR[i] / l - pr) + Math.abs(sB[i] / l - pb) < 0.25) on[i] = 1;
     }
     // abertura 3×3: corta pontes finas (dedo encostado na borda, ruído)
     const er = new Uint8Array(n);
@@ -222,6 +226,7 @@ const Engine = (() => {
       const i = y * w + x;
       if (er[i] || er[i - 1] || er[i + 1] || er[i - w] || er[i + w] || er[i - w - 1] || er[i - w + 1] || er[i + w - 1] || er[i + w + 1]) on[i] = 1;
     }
+    if (Engine._debug) Engine._dbg = { on, thr, pr, pb };
     const lab = new Int32Array(n), stack = new Int32Array(n);
     const comps = []; let cur = 0;
     for (let i = 0; i < n; i++) {
@@ -480,15 +485,25 @@ const Engine = (() => {
   }
 
   /** cap e tpl: RGB float W×H já alinhados. Devolve alfa (0..255) da tinta e a cor da tinta. */
+  /**
+   * Separa a tinta da assinatura.
+   * cap: foto da carta (RGB float W×H) já alinhada; tpl: carta limpa (RGB float W×H).
+   * Pega o traço inteiro, inclusive as partes fracas, por "histerese": começa nos pontos de tinta
+   * forte e cresce para os pontos fracos ligados a eles. A transparência de cada ponto vem da
+   * escuridão real da tinta na foto (reproduz o traço como ele é).
+   */
   function extractSignature(cap, tpl, W, H, opts) {
     opts = opts || {};
-    cap = alignToTemplate(cap, tpl, W, H);
+    if (!opts.noAlign) cap = alignToTemplate(cap, tpl, W, H);
     const n = W * H;
     const tl = new Float32Array(n);
     for (let i = 0; i < n; i++) tl[i] = 0.299 * tpl[i * 3] + 0.587 * tpl[i * 3 + 1] + 0.114 * tpl[i * 3 + 2];
-    // menor brilho da carta num raio de 4 px: tolera pequeno desalinhamento entre foto e carta guardada
-    const tmin = minFilter(tl, W, H, opts.court ? 2 : 3);
-    // bordas do desenho da carta (onde um pequeno desalinhamento geraria "falsa tinta")
+    const tmin = minFilter(tl, W, H, opts.r || 2);
+    // por canal: sobre áreas coloridas compara o canal mais forte da cor (ex.: o vermelho de um naipe de copas)
+    const tc = [0, 1, 2].map(c => { const a = new Float32Array(n); for (let i = 0; i < n; i++) a[i] = tpl[i * 3 + c]; return minFilter(a, W, H, opts.r || 2); });
+    const dom = new Uint8Array(n);
+    for (let i = 0; i < n; i++) { const r = tpl[i * 3], g = tpl[i * 3 + 1], b = tpl[i * 3 + 2]; dom[i] = r >= g && r >= b ? 0 : g >= b ? 1 : 2; }
+    // bordas do desenho (fora da estimativa de "papel")
     const tb = boxSum(integral(tl, W, H), W, H, 1);
     const edge = new Float32Array(n);
     for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
@@ -498,83 +513,168 @@ const Engine = (() => {
       if (Math.abs(gx) + Math.abs(gy) > 9 * 70) edge[i] = 1;
     }
     const edgeD = boxSum(integral(edge, W, H), W, H, 3);
-    // ganho local do papel por canal (compensa luz fraca, sombra e cor da luz)
-    const R = 26;
-    let S = new Float32Array(n);
-    const gains = [null, null, null];
-    for (let pass = 0; pass < 2; pass++) {
-      const paper = new Float32Array(n);
-      for (let i = 0; i < n; i++) if (edgeD[i] === 0 && tl[i] > 170 && S[i] < 0.15) paper[i] = 1;
-      const pc = boxSum(integral(paper, W, H), W, H, R);
-      let totP = 0; for (let i = 0; i < n; i++) totP += paper[i];
-      for (let c = 0; c < 3; c++) {
-        const a = new Float32Array(n), b = new Float32Array(n);
-        let ga = 0, gb = 0;
-        for (let i = 0; i < n; i++) if (paper[i]) { a[i] = cap[i * 3 + c]; b[i] = tpl[i * 3 + c]; ga += a[i]; gb += b[i]; }
-        const gGlobal = totP > 0 ? ga / Math.max(gb, 1) : 1;
-        const sa = boxSum(integral(a, W, H), W, H, R), sb = boxSum(integral(b, W, H), W, H, R);
-        const g = new Float32Array(n);
-        for (let i = 0; i < n; i++) g[i] = pc[i] > 40 ? sa[i] / Math.max(sb[i], 1) : gGlobal;
-        gains[c] = g;
-      }
-      S = new Float32Array(n);
+    // --- dedo: detectado pela COR (pele), com o balanço de branco geral da foto ---
+    const wb = [0, 0, 0];
+    {
+      const rs_ = [[], [], []];
+      for (let i = 0; i < n; i += 3) if (edgeD[i] === 0 && tl[i] > 200) for (let c = 0; c < 3; c++) rs_[c].push(cap[i * 3 + c] / Math.max(tpl[i * 3 + c], 1));
+      for (let c = 0; c < 3; c++) { const v = rs_[c].sort((p, q) => p - q); wb[c] = v.length ? Math.max(v[Math.floor(v.length * 0.75)], 0.01) : 1; }
+    }
+    const skin = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const r = cap[i * 3] / wb[0], g = cap[i * 3 + 1] / wb[1], b = cap[i * 3 + 2] / wb[2];
+      const L = 0.299 * r + 0.587 * g + 0.114 * b;
+      if (L < 25) continue;
+      const cr_ = r / L, cb_ = b / L, tr = tpl[i * 3] / Math.max(tl[i], 1);
+      if (tl[i] > 150 && cr_ - cb_ > 0.3 && cr_ - tr > 0.12) skin[i] = 1;                  // pele sobre papel branco
+      else if (tl[i] <= 150 && L > tl[i] * 1.5 + 30 && g > tpl[i * 3 + 1] * 2 + 50 && cr_ - cb_ > 0.25) skin[i] = 1; // pele sobre naipe/desenho
+    }
+    const skinD0 = boxSum(integral(skin, W, H), W, H, 4);
+    const skinCore = new Float32Array(n); for (let i = 0; i < n; i++) if (skinD0[i] > 30) skinCore[i] = 1;
+    { // dedo é uma região grande: descarta manchas pequenas
+      const lab = new Int32Array(n), st = new Int32Array(n); let cur = 0;
       for (let i = 0; i < n; i++) {
-        const e = tmin[i];
-        if (e < 45) continue; // embaixo de partes escuras do desenho não dá para ver tinta
-        const r = cap[i * 3] / Math.max(gains[0][i], 0.02), g = cap[i * 3 + 1] / Math.max(gains[1][i], 0.02), b = cap[i * 3 + 2] / Math.max(gains[2][i], 0.02);
-        const nl = 0.299 * r + 0.587 * g + 0.114 * b, ratio = nl / e;
-        const rr = r / (tpl[i * 3] + 1), rg = g / (tpl[i * 3 + 1] + 1), rb = b / (tpl[i * 3 + 2] + 1);
-        if (tl[i] > 150 && rr - rb > 0.2 && rg > 0.33 && rr > 0.5) continue; // pele (dedos)
-        const sv = (0.72 - ratio) / 0.3;
-        S[i] = sv < 0 ? 0 : sv > 1 ? 1 : sv;
+        if (!skinCore[i] || lab[i]) continue;
+        cur++; let sp = 0; st[sp++] = i; lab[i] = cur; const list = [];
+        while (sp) { const p = st[--sp]; list.push(p); const x = p % W;
+          if (x > 0 && skinCore[p - 1] && !lab[p - 1]) { lab[p - 1] = cur; st[sp++] = p - 1; }
+          if (x < W - 1 && skinCore[p + 1] && !lab[p + 1]) { lab[p + 1] = cur; st[sp++] = p + 1; }
+          if (p >= W && skinCore[p - W] && !lab[p - W]) { lab[p - W] = cur; st[sp++] = p - W; }
+          if (p < n - W && skinCore[p + W] && !lab[p + W]) { lab[p + W] = cur; st[sp++] = p + W; } }
+        if (list.length < n * 0.006) for (const p of list) skinCore[p] = 0;
       }
     }
-    // componentes conectados do traço
-    const core = new Uint8Array(n); for (let i = 0; i < n; i++) if (S[i] > 0.3) core[i] = 1;
+    // a borda borrada do dedo parece tinta: exclui uma margem em volta
+    const skinD = boxSum(integral(skinCore, W, H), W, H, Math.round(W * 0.035));
+    const R = Math.round(W * 0.05);
+    const ratio = new Float32Array(n).fill(9);
+    let gains = null;
+    for (let pass = 0; pass < 2; pass++) {
+      const paper = new Float32Array(n);
+      for (let i = 0; i < n; i++) if (edgeD[i] === 0 && tl[i] > 170 && ratio[i] > 0.85 && ratio[i] !== 8 && skinD[i] === 0) paper[i] = 1;
+      const pc = boxSum(integral(paper, W, H), W, H, R);
+      let totP = 0; for (let i = 0; i < n; i++) totP += paper[i];
+      gains = [];
+      for (let c = 0; c < 3; c++) {
+        const av = new Float32Array(n), bv = new Float32Array(n);
+        let ga = 0, gb = 0;
+        for (let i = 0; i < n; i++) if (paper[i]) { av[i] = cap[i * 3 + c]; bv[i] = tpl[i * 3 + c]; ga += av[i]; gb += bv[i]; }
+        const gGlobal = totP > 0 ? ga / Math.max(gb, 1) : 1;
+        const sa = boxSum(integral(av, W, H), W, H, R), sb = boxSum(integral(bv, W, H), W, H, R);
+        const g = new Float32Array(n);
+        for (let i = 0; i < n; i++) g[i] = pc[i] > 60 ? sa[i] / Math.max(sb[i], 1) : gGlobal;
+        gains.push(g);
+      }
+      ratio.fill(9);
+      for (let i = 0; i < n; i++) {
+        const colored = tl[i] < 170;
+        const e = colored ? tc[dom[i]][i] : tmin[i];
+        if (e < 45) continue; // embaixo de partes pretas do desenho a tinta não aparece
+        const r = cap[i * 3] / Math.max(gains[0][i], 0.02), g = cap[i * 3 + 1] / Math.max(gains[1][i], 0.02), b = cap[i * 3 + 2] / Math.max(gains[2][i], 0.02);
+        if (colored) { ratio[i] = (dom[i] === 0 ? r : dom[i] === 1 ? g : b) / e; continue; }
+        if (tl[i] > 150) { // pele (dedos) sobre o papel
+          const rr = r / (tpl[i * 3] + 1), rg = g / (tpl[i * 3 + 1] + 1), rb = b / (tpl[i * 3 + 2] + 1);
+          if (rr - rb > 0.2 && rg > 0.33 && rr > 0.5) { ratio[i] = 8; continue; }
+        }
+        ratio[i] = (0.299 * r + 0.587 * g + 0.114 * b) / e;
+      }
+    }
+    for (let i = 0; i < n; i++) if (skinD[i] > 0) ratio[i] = 9;
+    // suaviza um pouco o mapa (tira o ruído sem apagar traço fino)
+    const valid = new Float32Array(n), rv = new Float32Array(n);
+    for (let i = 0; i < n; i++) if (ratio[i] < 5) { valid[i] = 1; rv[i] = ratio[i]; }
+    const sv = boxSum(integral(valid, W, H), W, H, 1), sr = boxSum(integral(rv, W, H), W, H, 1);
+    const rs = new Float32Array(n).fill(9);
+    for (let i = 0; i < n; i++) if (valid[i]) rs[i] = sr[i] / sv[i];
+    // ruído, medido no papel limpo
+    const samp = [];
+    for (let i = 0; i < n; i += 5) if (edgeD[i] === 0 && tl[i] > 170 && rs[i] < 5) samp.push(rs[i]);
+    samp.sort((p, q) => p - q);
+    const med = samp.length ? samp[samp.length >> 1] : 1;
+    const dev = samp.map(v => Math.abs(v - med)).sort((p, q) => p - q);
+    const sigma = dev.length ? 1.4826 * dev[dev.length >> 1] : 0.02;
+    const weakT = med - Math.max(0.035, 3 * sigma);
+    const strongT = med - Math.max(0.09, 6 * sigma);
+    // margem externa (fundo atrás da carta)
+    const m0 = Math.round(W * 0.015);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (x < m0 || y < m0 || x >= W - m0 || y >= H - m0) { rs[y * W + x] = 9; ratio[y * W + x] = 9; }
+    // histerese: começa na tinta forte e segue o traço pelas partes fracas
+    // sobre áreas coloridas (naipes vermelhos, figuras) a câmera muda um pouco a cor: exige tinta mais escura
+    const wT = i => tl[i] < 170 ? weakT - 0.05 : weakT;
+    const sT = i => tl[i] < 170 ? strongT - 0.1 : strongT;
+    const cand = new Uint8Array(n); for (let i = 0; i < n; i++) if (rs[i] < wT(i)) cand[i] = 1;
     const lab = new Int32Array(n), stack = new Int32Array(n), keep = new Uint8Array(n);
-    const band = Math.round(W * 0.03);
+    const band = Math.round(W * 0.04);
     let cur = 0;
     for (let i = 0; i < n; i++) {
-      if (!core[i] || lab[i]) continue;
+      if (!cand[i] || lab[i]) continue;
       cur++; let sp = 0; stack[sp++] = i; lab[i] = cur;
-      const list = []; let minx = W, maxx = 0, miny = H, maxy = 0, touch = false;
+      const list = []; let seeds = 0, minx = W, maxx = 0, miny = H, maxy = 0, touch = false;
       while (sp) {
         const p = stack[--sp]; list.push(p);
+        if (rs[p] < sT(p)) seeds++;
         const x = p % W, y = (p / W) | 0;
         if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y;
         if (x < band || y < band || x >= W - band || y >= H - band) touch = true;
         for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
           const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
-          const q = yy * W + xx; if (core[q] && !lab[q]) { lab[q] = cur; stack[sp++] = q; }
+          const q = yy * W + xx; if (cand[q] && !lab[q]) { lab[q] = cur; stack[sp++] = q; }
         }
       }
       const area = list.length, bbox = (maxx - minx + 1) * (maxy - miny + 1);
-      if (area < 14) continue;
-      if (touch) continue;
-      if (area > n * 0.004 && area / bbox > 0.45) continue; // mancha (sombra/dedo), não traço
+      if (seeds < 4 || area < 25) continue;
+      if (touch && area > 500 && area / bbox > 0.5) continue; // mancha na borda (dedo/sombra), não traço
       for (const p of list) keep[p] = 1;
     }
+    // escuridão da tinta, com nível automático (tinta fraca na foto vira tinta de verdade)
     const kd = boxSum(integral(keep, W, H), W, H, 1);
+    const dk = [];
+    for (let i = 0; i < n; i++) if (keep[i]) dk.push(med - (0.5 * ratio[i] + 0.5 * rs[i]));
+    dk.sort((p, q) => p - q);
+    const dmax = dk.length ? Math.max(dk[Math.floor(dk.length * 0.9)], med - weakT + 0.05) : 0.5;
+    const d0 = (med - weakT) * 0.6;
     const alpha = new Uint8ClampedArray(n);
     let cr = 0, cg = 0, cb = 0, ck = 0, count = 0;
     for (let i = 0; i < n; i++) {
-      if (kd[i] === 0) continue;
-      const a = Math.min(1, S[i] * 1.2);
-      if (a <= 0) continue;
-      alpha[i] = Math.round(a * 255); count++;
-      if (keep[i] && S[i] > 0.6 && tl[i] > 170) {
+      if (kd[i] === 0 || ratio[i] > 5 || rs[i] > 5) continue;
+      const d = med - (0.5 * ratio[i] + 0.5 * rs[i]);
+      let a = (d - d0) / (dmax - d0);
+      if (a <= 0) continue; if (a > 1) a = 1;
+      alpha[i] = Math.round(Math.pow(a, 0.75) * 255);
+      if (keep[i]) count++;
+      if (keep[i] && rs[i] < strongT && tl[i] > 170) {
         cr += cap[i * 3] / Math.max(gains[0][i], 0.02); cg += cap[i * 3 + 1] / Math.max(gains[1][i], 0.02); cb += cap[i * 3 + 2] / Math.max(gains[2][i], 0.02); ck++;
       }
     }
-    let color = [22, 22, 26];
-    if (ck > 20) {
-      const r = cr / ck, g = cg / ck, b = cb / ck;
-      if (b > r * 1.25 && b > g * 1.05) color = [24, 38, 120];
+    // quanto da região da assinatura dava para ler (fora de partes pretas do desenho e do dedo)
+    let bx0 = W, bx1 = 0, by0 = H, by1 = 0;
+    for (let i = 0; i < n; i++) if (keep[i]) { const x = i % W, y = (i / W) | 0; if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y; }
+    let hidden = 0, tot = 0;
+    if (bx1 > bx0) {
+      const ex = Math.round((bx1 - bx0) * 0.08), ey = Math.round((by1 - by0) * 0.08);
+      for (let y = Math.max(m0, by0 - ey); y <= Math.min(H - 1 - m0, by1 + ey); y++) for (let x = Math.max(m0, bx0 - ex); x <= Math.min(W - 1 - m0, bx1 + ex); x++) {
+        const i = y * W + x; tot++; if ((tl[i] < 170 ? tc[dom[i]][i] : tmin[i]) < 45 || skinD[i] > 0) hidden++;
+      }
     }
-    return { alpha, color, count, W, H };
+    const hiddenFrac = tot ? hidden / tot : 0;
+    let color = [22, 22, 26];
+    if (ck > 20) { const r = cr / ck, g = cg / ck, b = cb / ck; if (b > r * 1.25 && b > g * 1.05) color = [24, 38, 120]; }
+    return { alpha, mask: keep, color, count, W, H, sigma, weakT, strongT, hiddenFrac };
   }
 
-  return { cardRect, detectCard, warp, features, match, sharpness, imageToRGB, templateFeatures, extractSignature, homography };
+  /** Quanto duas leituras da assinatura concordam (0 a 1), tolerando 1 px de diferença. */
+  function maskAgreement(a, b, W, H) {
+    const da = boxSum(integral(a, W, H), W, H, 1), db = boxSum(integral(b, W, H), W, H, 1);
+    let na = 0, nb = 0, ha = 0, hb = 0;
+    for (let i = 0; i < W * H; i++) {
+      if (a[i]) { na++; if (db[i] > 0) ha++; }
+      if (b[i]) { nb++; if (da[i] > 0) hb++; }
+    }
+    if (!na || !nb) return 0;
+    return Math.min(ha / na, hb / nb);
+  }
+
+  return { cardRect, detectCard, warp, features, match, sharpness, imageToRGB, templateFeatures, alignToTemplate, extractSignature, maskAgreement, homography };
 })();
 if (typeof window !== 'undefined') window.Engine = Engine;
 
