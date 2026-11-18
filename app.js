@@ -152,17 +152,26 @@
     } catch (e) {
       console.error(e);
       state = 'needtap';
-      hint.textContent = 'toque para ativar a câmera';
+      hint.textContent = 'toque para ativar a câmera' + (DEBUG ? ' (' + (e && e.name || e) + ')' : '');
     }
   }
 
+  let lastStepMs = 0, noFrameSince = 0, lastErr = '';
   function loop() {
     if (state !== 'capture') return;
     let res = null;
     try {
       const vw = video.videoWidth, vh = video.videoHeight;
-      if (vw && vh) res = cap.step(video, vw, vh);
-    } catch (e) { console.error(e); }
+      if (vw && vh) {
+        noFrameSince = 0;
+        const t0 = performance.now();
+        res = cap.step(video, vw, vh);
+        lastStepMs = performance.now() - t0;
+      } else {
+        if (!noFrameSince) noFrameSince = performance.now();
+        else if (performance.now() - noFrameSince > 4000) hint.textContent = 'câmera sem imagem — segure o canto superior esquerdo para tentar de novo';
+      }
+    } catch (e) { console.error(e); lastErr = String(e && e.message || e); }
     const I = cap.info;
     if (DEBUG) drawDebug();
     if (res) { finishCapture(res); return; }
@@ -410,6 +419,7 @@
     const m = I.match;
     let t = m ? `${CARD_BY_ID[m.best.id].label} ${m.best.score.toFixed(2)} / ${CARD_BY_ID[m.second.id].label} ${m.second.score.toFixed(2)}` : 'procurando carta...';
     if (I.phase === 'reading') t += `\nlendo assinatura ${I.frames}/6  larg ${I.width}px` + (I.agree ? `  concord ${I.agree.toFixed(2)}` : '') + (I.reason ? `\n${I.reason}` : '');
+    t += `\ncâmera ${video.videoWidth}x${video.videoHeight}  ${Math.round(lastStepMs)} ms/quadro` + (lastErr ? `\nERRO: ${lastErr}` : '');
     $('dbgt').textContent = t; $('dbgt').style.whiteSpace = 'pre';
   }
   function showReview(res, faceURL) {

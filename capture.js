@@ -8,7 +8,7 @@
 */
 const Capture = (() => {
   const SMALL_W = 300, MW = 60, MH = 84, SW = 600, SH = 840;
-  const MAXF = 6, MIN_W = 220, AGREE = 0.6;
+  const MAXF = 6, MIN_W = 140, AGREE = 0.6;
 
   function create(templates, cardById) {
     const tplById = Object.fromEntries(templates.map(t => [t.id, t]));
