@@ -7,19 +7,20 @@
     concordarem (traço estável = assinatura real e completa).
 */
 const Capture = (() => {
-  const SMALL_W = 360, MW = 60, MH = 84, SW = 600, SH = 840;
-  const MAXF = 6, MIN_W = 300, AGREE = 0.6;
+  const SMALL_W = 300, MW = 60, MH = 84, SW = 600, SH = 840;
+  const MAXF = 6, MIN_W = 220, AGREE = 0.6;
 
   function create(templates, cardById) {
+    const tplById = Object.fromEntries(templates.map(t => [t.id, t]));
     const small = document.createElement('canvas'), sctx = small.getContext('2d', { willReadFrequently: true });
     const big = document.createElement('canvas'), bctx = big.getContext('2d', { willReadFrequently: true });
     let streakId = null, streak = 0, id = null, tpl = null, frames = [], maxSharp = 0, misses = 0, t0 = 0;
-    let other = null, otherStreak = 0, tries = 0;
+    let other = null, otherStreak = 0, tries = 0, lockRot = null;
     const info = { phase: 'none', label: '', frames: 0, width: 0, agree: 0, ink: 0, reason: '' };
 
     function reset() {
       streakId = null; streak = 0; id = null; tpl = null; frames = []; maxSharp = 0; misses = 0;
-      other = null; otherStreak = 0; tries = 0;
+      other = null; otherStreak = 0; tries = 0; lockRot = null;
       Object.assign(info, { phase: 'none', label: '', frames: 0, width: 0, agree: 0, ink: 0, reason: '' });
     }
 
@@ -65,7 +66,7 @@ const Capture = (() => {
         if (!hiFeat[c.id]) hiFeat[c.id] = Engine.templateFeatures(cardById[c.id].img, HW, HH);
         return { id: c.id, feat: hiFeat[c.id] };
       });
-      const hm = Engine.match(f, cands);
+      const hm = Engine.match(f, cands, HW, HH);
       // a margem em alta resolução vale como margem (escala parecida com a normal)
       return { best: hm.best, second: hm.second, all: hm.all, hi: true };
     }
@@ -83,9 +84,27 @@ const Capture = (() => {
       if (small.width !== sw || small.height !== sh) { small.width = sw; small.height = sh; }
       sctx.drawImage(src, 0, 0, sw, sh);
       const img = sctx.getImageData(0, 0, sw, sh);
-      const det = Engine.detectCard(img);
-      let m = null;
-      if (det) m = Engine.match(Engine.features(Engine.warp(img, det.quad, MW, MH), MW, MH), templates);
+      // pode haver mais de um retângulo claro: fica com o que mais parece uma das 52 cartas
+      let det = null, m = null;
+      for (const c of Engine.detectCards(img)) {
+        const mc = Engine.match(Engine.features(Engine.warp(img, c.quad, MW, MH), MW, MH), templates, MW, MH);
+        if (!m || mc.best.score > m.best.score) { m = mc; det = c; }
+      }
+      // cantos imprecisos (dedo, fundo claro): ajusta usando a própria carta como régua
+      if (det && m.best.score > 0.4 && m.best.score < 0.85) {
+        let bestR = null;
+        // já sabendo a carta, ajusta só contra ela (mais rápido)
+        const known = id ? m.all.filter(a => a.id === id) : [];
+        const list = known.length ? known : m.all.slice(0, 2);
+        for (const cand of list) {
+          const r = Engine.refineQuadByMatch(img, det.quad, tplById[cand.id].feat, cand.rot, MW, MH, known.length ? [0.04, 0.02, 0.01] : null);
+          if (!bestR || r.score > bestR.score) bestR = r;
+        }
+        if (bestR.score > m.best.score + 0.02) {
+          det = Object.assign({}, det, { quad: bestR.quad });
+          m = Engine.match(Engine.features(Engine.warp(img, det.quad, MW, MH), MW, MH), templates, MW, MH);
+        }
+      }
       info.det = det; info.match = m; info.small = small;
 
       if (!id) {
@@ -95,7 +114,7 @@ const Capture = (() => {
           const hm = hiResMatch(src, vw, vh, det, m, sw);
           if (hm) { m = hm; info.match = hm; }
         }
-        const ok = m.best.score > 0.55 && m.best.score - m.second.score > 0.04;
+        const ok = m.best.score > 0.66 && m.best.score - m.second.score > 0.035;
         if (!ok) { streak = 0; streakId = null; return null; }
         if (m.best.id === streakId) streak++; else { streakId = m.best.id; streak = 1; }
         if (streak >= 3) {
@@ -115,9 +134,26 @@ const Capture = (() => {
         return null;
       }
       misses = 0; otherStreak = 0;
+      // orientação travada no primeiro quadro bom (cartas quase simétricas não podem alternar)
+      let rot = m.best.rot;
+      if (lockRot !== null && rot !== lockRot) {
+        const f = Engine.features(Engine.warp(img, det.quad, MW, MH), MW, MH);
+        const sl = Engine.scoreOne(f, tplById[id].feat, lockRot, MW, MH);
+        if (sl > m.best.score - 0.06) rot = lockRot; else { info.reason = 'carta girou'; return null; }
+      }
+      // só entra na média quadro em que o recorte bate muito bem com a carta
+      if (m.best.score < 0.72) { info.reason = 'enquadramento ruim (' + m.best.score.toFixed(2) + ')'; return null; }
+      // carta quase igual de cabeça para baixo (ex.: 4♠): usa a posição em que ela estava em pé diante da câmera
+      if (lockRot === null) {
+        const f = Engine.features(Engine.warp(img, det.quad, MW, MH), MW, MH);
+        const alt = rot ^ 1, sa = Engine.scoreOne(f, tplById[id].feat, alt, MW, MH), sr = Engine.scoreOne(f, tplById[id].feat, rot, MW, MH);
+        if (Math.abs(sa - sr) < 0.03) {
+          const oq = Engine.orient(det.quad, rot);
+          if ((oq[0].y + oq[1].y) / 2 > (oq[2].y + oq[3].y) / 2) rot = alt;
+        }
+      }
       const s = vw / sw;
-      let q = det.quad.map(p => ({ x: p.x * s, y: p.y * s }));
-      if (m.best.rot) q = [q[2], q[3], q[0], q[1]];
+      const q = Engine.orient(det.quad.map(p => ({ x: p.x * s, y: p.y * s })), rot);
       const r = Engine.cropRefine(src, vw, vh, q, big, bctx);
       if (!r) return null;
       const Q = r.quad;
@@ -132,6 +168,7 @@ const Capture = (() => {
       const data = new Uint8ClampedArray(al.length);
       for (let i = 0; i < al.length; i++) data[i] = al[i];
       frames.push({ data, sharp });
+      if (lockRot === null) lockRot = rot;
       info.frames = frames.length; info.reason = '';
       if (frames.length >= MAXF || (frames.length >= 4 && performance.now() - t0 > 2500)) return evaluate();
       return null;

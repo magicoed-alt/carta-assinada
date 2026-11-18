@@ -104,22 +104,52 @@ const Engine = (() => {
       }
     }
     if (chains.length < 4) return null;
-    const top4 = chains.slice().sort((p, q) => q.l - p.l).slice(0, 4);
-    if (top4[3].l < per * 0.06) return null;
-    top4.sort((p, q) => p.order - q.order);
     const diag = Math.max(...pts.map(p => p[0])) - Math.min(...pts.map(p => p[0])) + Math.max(...pts.map(p => p[1])) - Math.min(...pts.map(p => p[1]));
-    const tol = Math.max(1.5, diag * 0.008);
-    const lines = top4.map(ch => {
-      const L = Math.hypot(ch.vx, ch.vy), ux = ch.vx / L, uy = ch.vy / L;
+    const tol = Math.max(1.5, diag * 0.01);
+    // apoio de cada trecho = quantos pontos do contorno caem sobre a reta dele
+    // (um lado de verdade tem muitos; o "atalho" do contorno por cima de um dedo tem poucos)
+    // ajuste iterativo: tolerância larga → estreita, descartando os piores pontos
+    const lineSel = (ln, ax, ay, L, ux, uy, tl_) => {
       const sel = [];
       for (const p of pts) {
-        const px = p[0] - ch.a[0], py = p[1] - ch.a[1];
-        const t = px * ux + py * uy;
-        if (t < -L * 0.1 || t > L * 1.1) continue;
-        if (Math.abs(-px * uy + py * ux) < tol) sel.push(p);
+        const px = p[0] - ax, py = p[1] - ay, t = px * ux + py * uy;
+        if (t < -L * 0.6 || t > L * 1.6) continue;
+        const dd = Math.abs(-(p[0] - ln.px) * ln.dy + (p[1] - ln.py) * ln.dx);
+        if (dd < tl_) sel.push([p[0], p[1], dd]);
       }
-      return sel.length >= 6 ? fitLine(sel) : { px: ch.a[0], py: ch.a[1], dx: ux, dy: uy };
-    });
+      return sel;
+    };
+    for (const ch of chains) {
+      const L = Math.hypot(ch.vx, ch.vy) || 1, ux = ch.vx / L, uy = ch.vy / L;
+      let ln = { px: ch.a[0], py: ch.a[1], dx: ux, dy: uy };
+      let sel = [];
+      for (const k of [3.5, 2, 1.2]) {
+        sel = lineSel(ln, ch.a[0], ch.a[1], L, ux, uy, tol * k);
+        if (sel.length < 6) break;
+        sel.sort((p, q) => p[2] - q[2]);
+        const keep = sel.slice(0, Math.max(6, Math.ceil(sel.length * 0.75)));
+        ln = fitLine(keep);
+      }
+      sel = lineSel(ln, ch.a[0], ch.a[1], L, ux, uy, tol * 1.2);
+      ch.sel = sel; ch.support = sel.length; ch.line = ln;
+    }
+    // junta trechos sobre a mesma reta (lado interrompido por um dedo)
+    const byS = chains.slice().sort((p, q) => q.support - p.support), picked = [];
+    for (const ch of byS) {
+      if (ch.support < 6) continue;
+      const same = picked.find(o => {
+        const cosA = Math.abs(o.line.dx * ch.line.dx + o.line.dy * ch.line.dy);
+        const off = Math.abs(-(ch.line.px - o.line.px) * o.line.dy + (ch.line.py - o.line.py) * o.line.dx);
+        return cosA > Math.cos(0.14) && off < tol * 3;
+      });
+      if (same) { same.sel = same.sel.concat(ch.sel); same.line = fitLine(same.sel); same.support += ch.support; continue; }
+      picked.push(ch);
+      if (picked.length >= 4) break;
+    }
+    if (picked.length < 4) return null;
+    if (picked[3].support < per * 0.03) return null;
+    picked.sort((p, q) => p.order - q.order);
+    const lines = picked.map(ch => ch.line);
     const c = [];
     for (let k = 0; k < 4; k++) { const p = intersect(lines[(k + 3) % 4], lines[k]); if (!p) return null; c.push(p); }
     return orderQuad(c);
@@ -138,7 +168,45 @@ const Engine = (() => {
     return orderQuad([p1, p2, p3, p4].map(p => ({ x: p[0], y: p[1] })));
   }
 
-  function quadFromComponent(lab, id, w, h, on) {
+  function sampleL(L, w, h, x, y) {
+    if (x < 0) x = 0; if (y < 0) y = 0; if (x > w - 1.001) x = w - 1.001; if (y > h - 1.001) y = h - 1.001;
+    const x0 = x | 0, y0 = y | 0, fx = x - x0, fy = y - y0, i = y0 * w + x0;
+    return (L[i] * (1 - fx) + L[i + 1] * fx) * (1 - fy) + (L[i + w] * (1 - fx) + L[i + w + 1] * fx) * fy;
+  }
+  /** Encosta cada lado na borda real (ponto de maior contraste perto da reta). */
+  function snapQuad(c, L, w, h, rf) {
+    const gx = (c[0].x + c[1].x + c[2].x + c[3].x) / 4, gy = (c[0].y + c[1].y + c[2].y + c[3].y) / 4;
+    const short = Math.min(dist(c[0], c[1]), dist(c[1], c[2]));
+    const R = Math.max(3, short * (rf || 0.06));
+    const lines = [];
+    for (let k = 0; k < 4; k++) {
+      const a = c[k], b = c[(k + 1) % 4];
+      const ex = b.x - a.x, ey = b.y - a.y, el = Math.hypot(ex, ey);
+      let nx = -ey / el, ny = ex / el;
+      if (nx * (gx - (a.x + b.x) / 2) + ny * (gy - (a.y + b.y) / 2) < 0) { nx = -nx; ny = -ny; }
+      const pts = [];
+      for (let j = 0; j < 28; j++) {
+        const t = 0.12 + 0.76 * j / 27, px = a.x + ex * t, py = a.y + ey * t;
+        let best = -1, bo = 0;
+        for (let o = -R; o <= R; o += 0.5) {
+          const qx = px + nx * o, qy = py + ny * o;
+          const g = Math.abs(sampleL(L, w, h, qx + nx, qy + ny) - sampleL(L, w, h, qx - nx, qy - ny));
+          if (g > best) { best = g; bo = o; }
+        }
+        if (best > 8) pts.push([px + nx * bo, py + ny * bo]);
+      }
+      if (pts.length < 8) { lines.push({ px: a.x, py: a.y, dx: ex / el, dy: ey / el }); continue; }
+      let ln = fitLine(pts);
+      const res = pts.map(p => [p, Math.abs(-(p[0] - ln.px) * ln.dy + (p[1] - ln.py) * ln.dx)]).sort((p, q) => p[1] - q[1]);
+      ln = fitLine(res.slice(0, Math.ceil(res.length * 0.7)).map(r => r[0]));
+      lines.push(ln);
+    }
+    const out = [];
+    for (let k = 0; k < 4; k++) { const p = intersect(lines[(k + 3) % 4], lines[k]); if (!p || dist(p, c[k]) > short * 0.15) return null; out.push(p); }
+    return out;
+  }
+
+  function quadFromComponent(lab, id, w, h, on, L) {
     // preenche os "buracos" (naipes, figuras) para ficar só o contorno externo da carta
     const n = w * h, outside = new Uint8Array(n), stack = new Int32Array(n); let sp = 0;
     const push = q => { if (!outside[q] && lab[q] !== id) { outside[q] = 1; stack[sp++] = q; } };
@@ -153,7 +221,8 @@ const Engine = (() => {
       if (outside[i]) continue;
       area++;
       const x = i % w, y = (i / w) | 0;
-      if (x === 0 || y === 0 || x === w - 1 || y === h - 1) { border++; pts.push([x, y]); continue; }
+      if (x <= 2 || y <= 2 || x >= w - 3 || y >= h - 3) border++;
+      if (x === 0 || y === 0 || x === w - 1 || y === h - 1) { pts.push([x, y]); continue; }
       if (outside[i - 1] || outside[i + 1] || outside[i - w] || outside[i + w]) pts.push([x, y]);
     }
     if (pts.length < 40 || border > pts.length * 0.04) return null;
@@ -161,7 +230,9 @@ const Engine = (() => {
     if (hull.length < 4) return null;
     let c = quadFromHull(hull, pts) || quadFromExtremes(hull, pts);
     if (!c) return null;
+    if (L) { const sn = snapQuad(c, L, w, h); if (sn) c = sn; }
     if (!isConvex(c)) return null;
+
     const s01 = dist(c[0], c[1]), s23 = dist(c[2], c[3]), s12 = dist(c[1], c[2]), s30 = dist(c[3], c[0]);
     if (Math.min(s01, s23) / Math.max(s01, s23) < 0.75 || Math.min(s12, s30) / Math.max(s12, s30) < 0.75) return null;
     const short = (s01 + s23) / 2, long = (s12 + s30) / 2;
@@ -169,9 +240,9 @@ const Engine = (() => {
     if (ratio < 0.5 || ratio > 0.92) return null;
     const qa = quadArea(c), fill = area / qa;
     if (fill > 1.12) return null;
-    // a margem branca da carta tem que estar logo dentro de cada lado, e fora tem que ser escuro
+    // a margem da carta tem que estar logo dentro de cada lado, e a borda tem que ter contraste com o fundo
     const gx = (c[0].x + c[1].x + c[2].x + c[3].x) / 4, gy = (c[0].y + c[1].y + c[2].y + c[3].y) / 4;
-    let inTot = 0, outTot = 0, N = 0, minSide = 1;
+    let inTot = 0, N = 0, minSide = 1, minCon = 1e9, outTot = 0;
     for (let k = 0; k < 4; k++) {
       const a = c[k], b = c[(k + 1) % 4];
       const ex = b.x - a.x, ey = b.y - a.y, el = Math.hypot(ex, ey);
@@ -179,76 +250,153 @@ const Engine = (() => {
       const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
       if (nx * (gx - mx) + ny * (gy - my) < 0) { nx = -nx; ny = -ny; }
       const off = Math.max(1.5, short * 0.035);
-      let sin = 0, sout = 0, cnt = 0;
+      let sin = 0, cnt = 0, li = 0, lo = 0, sout = 0;
       for (let j = 0; j < 30; j++) {
         const t = 0.1 + 0.8 * j / 29, px = a.x + ex * t, py = a.y + ey * t;
         const ix = Math.round(px + nx * off), iy = Math.round(py + ny * off);
-        const ox = Math.round(px - nx * off * 1.5), oy = Math.round(py - ny * off * 1.5);
+        const ox = Math.min(w - 1, Math.max(0, Math.round(px - nx * off * 1.5))), oy = Math.min(h - 1, Math.max(0, Math.round(py - ny * off * 1.5)));
         cnt++;
-        if (ix >= 0 && iy >= 0 && ix < w && iy < h && on[iy * w + ix]) sin++;
-        if (!(ox >= 0 && oy >= 0 && ox < w && oy < h) || !on[oy * w + ox]) sout++;
+        if (ix >= 0 && iy >= 0 && ix < w && iy < h) { if (on[iy * w + ix]) sin++; if (L) li += L[iy * w + ix]; }
+        if (!on[oy * w + ox]) sout++;
+        if (L) lo += L[oy * w + ox];
       }
       inTot += sin; outTot += sout; N += cnt; minSide = Math.min(minSide, sin / cnt);
+      if (L) minCon = Math.min(minCon, Math.abs(li - lo) / cnt);
     }
-    if (inTot / N < 0.72 || minSide < 0.4 || outTot / N < 0.7) return null;
-    return { quad: c, area: qa, fill, ratio, edge: inTot / N };
+    if (inTot / N < 0.72 || minSide < 0.4) return null;
+    if (L ? minCon < 7 : outTot / N < 0.7) return null;
+    return { quad: c, area: qa, fill, ratio, edge: (inTot + outTot) / (2 * N) };
   }
 
-  /** Procura a carta (retângulo claro) num quadro pequeno (ImageData). */
-  function detectCard(img) {
-    const w = img.width, h = img.height, n = w * h;
-    const d = img.data, L = lumOf(d, n);
-    const thr = Math.max(otsu(L), 28);
-    // cor do papel = média dos 2% de pixels mais claros; pele e fundo colorido ficam de fora
-    const hist = new Uint32Array(256); for (let i = 0; i < n; i++) hist[L[i] | 0]++;
-    let acc = 0, top = 255; while (top > 0 && acc + hist[top] < n * 0.02) { acc += hist[top]; top--; }
-    let pr = 0, pb = 0, pk = 0;
-    for (let i = 0; i < n; i++) if (L[i] >= top) { const l = L[i] || 1; pr += d[i * 4] / l; pb += d[i * 4 + 2] / l; pk++; }
-    pr /= pk || 1; pb /= pk || 1;
-    // cor média num raio de 2 px (o ruído de cor da câmera no escuro é grande pixel a pixel)
-    const Rc = new Float32Array(n), Gc = new Float32Array(n), Bc = new Float32Array(n);
-    for (let i = 0; i < n; i++) { Rc[i] = d[i * 4]; Gc[i] = d[i * 4 + 1]; Bc[i] = d[i * 4 + 2]; }
-    const sR = boxSum(integral(Rc, w, h), w, h, 2), sG = boxSum(integral(Gc, w, h), w, h, 2), sB = boxSum(integral(Bc, w, h), w, h, 2);
-    const on = new Uint8Array(n);
-    for (let i = 0; i < n; i++) {
-      if (L[i] <= thr) continue;
-      const l = 0.299 * sR[i] + 0.587 * sG[i] + 0.114 * sB[i] || 1;
-      if (Math.abs(sR[i] / l - pr) + Math.abs(sB[i] / l - pb) < 0.25) on[i] = 1;
+  function erode(on, w, h) {
+    const n = w * h, out = new Uint8Array(n);
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      if (on[i] && on[i - 1] && on[i + 1] && on[i - w] && on[i + w]) out[i] = 1;
     }
-    // abertura 3×3: corta pontes finas (dedo encostado na borda, ruído)
-    const er = new Uint8Array(n);
+    return out;
+  }
+  function dilate(on, w, h) {
+    const n = w * h, out = new Uint8Array(n);
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      if (on[i] || on[i - 1] || on[i + 1] || on[i - w] || on[i + w]) out[i] = 1;
+    }
+    return out;
+  }
+
+  function openMask(on, w, h) {
+    const n = w * h, er = new Uint8Array(n), out = new Uint8Array(n);
     for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
       const i = y * w + x;
       if (on[i] && on[i - 1] && on[i + 1] && on[i - w] && on[i + w] && on[i - w - 1] && on[i - w + 1] && on[i + w - 1] && on[i + w + 1]) er[i] = 1;
     }
-    on.fill(0);
     for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
       const i = y * w + x;
-      if (er[i] || er[i - 1] || er[i + 1] || er[i - w] || er[i + w] || er[i - w - 1] || er[i - w + 1] || er[i + w - 1] || er[i + w + 1]) on[i] = 1;
+      if (er[i] || er[i - 1] || er[i + 1] || er[i - w] || er[i + w] || er[i - w - 1] || er[i - w + 1] || er[i + w - 1] || er[i + w + 1]) out[i] = 1;
     }
-    if (Engine._debug) Engine._dbg = { on, thr, pr, pb };
-    const lab = new Int32Array(n), stack = new Int32Array(n);
-    const comps = []; let cur = 0;
+    return out;
+  }
+
+  function labelMask(on, w, h, minArea) {
+    const n = w * h, lab = new Int32Array(n), stack = new Int32Array(n), comps = [];
+    let cur = 0;
     for (let i = 0; i < n; i++) {
       if (lab[i] || !on[i]) continue;
       cur++; let sp = 0; stack[sp++] = i; lab[i] = cur; let area = 0;
+      let x0 = w, x1 = 0, y0 = h, y1 = 0;
       while (sp) {
         const p = stack[--sp]; area++;
-        const x = p % w;
+        const x = p % w, y = (p / w) | 0;
+        if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
         if (x > 0) { const q = p - 1; if (!lab[q] && on[q]) { lab[q] = cur; stack[sp++] = q; } }
         if (x < w - 1) { const q = p + 1; if (!lab[q] && on[q]) { lab[q] = cur; stack[sp++] = q; } }
         if (p >= w) { const q = p - w; if (!lab[q] && on[q]) { lab[q] = cur; stack[sp++] = q; } }
         if (p < n - w) { const q = p + w; if (!lab[q] && on[q]) { lab[q] = cur; stack[sp++] = q; } }
       }
-      if (area > n * 0.006) comps.push({ id: cur, area });
+      if (area > minArea) comps.push({ id: cur, area, x0, x1, y0, y1 });
     }
     comps.sort((a, b) => b.area - a.area);
-    for (let k = 0; k < Math.min(3, comps.length); k++) {
-      const r = quadFromComponent(lab, comps[k].id, w, h, on);
-      if (r) return r;
-    }
-    return null;
+    return { lab, comps };
   }
+
+  /**
+   * Procura cartas (retângulos claros) num quadro pequeno. Tenta vários níveis de brilho,
+   * porque atrás da carta pode haver coisas mais claras que ela (luzes do teto, câmera da frente).
+   * Devolve os candidatos, do mais provável para o menos.
+   */
+  function detectCards(img) {
+    const w = img.width, h = img.height, n = w * h;
+    const d = img.data, L = lumOf(d, n);
+    // cor média num raio de 2 px (o ruído de cor da câmera no escuro é grande pixel a pixel)
+    const Rc = new Float32Array(n), Gc = new Float32Array(n), Bc = new Float32Array(n);
+    for (let i = 0; i < n; i++) { Rc[i] = d[i * 4]; Gc[i] = d[i * 4 + 1]; Bc[i] = d[i * 4 + 2]; }
+    const sR = boxSum(integral(Rc, w, h), w, h, 2), sG = boxSum(integral(Gc, w, h), w, h, 2), sB = boxSum(integral(Bc, w, h), w, h, 2);
+    const cR = new Float32Array(n), cB = new Float32Array(n);
+    for (let i = 0; i < n; i++) { const l = 0.299 * sR[i] + 0.587 * sG[i] + 0.114 * sB[i] || 1; cR[i] = sR[i] / l; cB[i] = sB[i] / l; }
+    const hist = new Uint32Array(256); for (let i = 0; i < n; i++) hist[L[i] | 0]++;
+    const quant = q => { let acc = 0; for (let t = 0; t < 256; t++) { acc += hist[t]; if (acc >= n * q) return t; } return 255; };
+    const thrs = [];
+    for (const t of [otsu(L), quant(0.6), quant(0.8)]) {
+      const v = Math.max(t, 28);
+      if (v < 250 && !thrs.some(u => Math.abs(u - v) < 8)) thrs.push(v);
+    }
+    const cands = [];
+    const tries = [];
+    for (const t of thrs) tries.push([t, 1]);
+    // carta mais escura que o fundo (teto claro, luzes atrás dela)
+    for (const t of [quant(0.4), quant(0.6)]) if (t > 40 && t < 250) tries.push([t, -1]);
+    for (const [thr, pol] of tries) {
+      const m0 = new Uint8Array(n);
+      if (pol > 0) { for (let i = 0; i < n; i++) if (L[i] > thr) m0[i] = 1; }
+      else { for (let i = 0; i < n; i++) if (L[i] < thr && L[i] > 25) m0[i] = 1; }
+      const { lab, comps } = labelMask(openMask(m0, w, h), w, h, n * 0.006);
+      for (let k = 0; k < Math.min(3, comps.length); k++) {
+        const cp = comps[k], id = cp.id;
+        // trabalha só na região deste pedaço (bem mais rápido)
+        const pad = 6;
+        const bx0 = Math.max(0, cp.x0 - pad), by0 = Math.max(0, cp.y0 - pad), bx1 = Math.min(w - 1, cp.x1 + pad), by1 = Math.min(h - 1, cp.y1 + pad);
+        const sw = bx1 - bx0 + 1, sh = by1 - by0 + 1, sn = sw * sh;
+        const vr = [], vb = [];
+        for (let y = cp.y0; y <= cp.y1; y += 2) for (let x = cp.x0; x <= cp.x1; x += 2) { const i = y * w + x; if (lab[i] === id) { vr.push(cR[i]); vb.push(cB[i]); } }
+        if (vr.length < 20) continue;
+        vr.sort((p, q) => p - q); vb.sort((p, q) => p - q);
+        const mr = vr[vr.length >> 1], mb = vb[vb.length >> 1];
+        if (mr - mb > 0.6) continue; // pedaço avermelhado demais para ser papel
+        const ref = new Uint8Array(sn), subL = new Float32Array(sn);
+        for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) {
+          const i = (y + by0) * w + x + bx0, j = y * sw + x;
+          subL[j] = L[i];
+          if (lab[i] === id && Math.abs(cR[i] - mr) + Math.abs(cB[i] - mb) < 0.25) ref[j] = 1;
+        }
+        const on = openMask(ref, sw, sh);
+        const L2 = labelMask(on, sw, sh, n * 0.006);
+        if (!L2.comps.length) continue;
+        const r = quadFromComponent(L2.lab, L2.comps[0].id, sw, sh, on, subL);
+        if (!r) continue;
+        // um retângulo que encosta na borda da FOTO (não do recorte) é descartado
+        const qf = r.quad.map(p => ({ x: p.x + bx0, y: p.y + by0 }));
+        if (qf.some(p => p.x < 3 || p.y < 3 || p.x > w - 4 || p.y > h - 4)) continue;
+        if ((bx0 === 0 && cp.x0 <= 1) || (by0 === 0 && cp.y0 <= 1) || (bx1 === w - 1 && cp.x1 >= w - 2) || (by1 === h - 1 && cp.y1 >= h - 2)) continue;
+        if (quadArea(qf) > w * h * 0.75) continue;
+        r.quad = qf;
+        if (Engine._debug) r.on = null;
+        cands.push(r);
+      }
+    }
+    // tira repetidos (o mesmo retângulo achado em níveis diferentes)
+    cands.sort((a, b) => b.edge - a.edge);
+    const out = [];
+    for (const c of cands) {
+      const diag = Math.hypot(c.quad[0].x - c.quad[2].x, c.quad[0].y - c.quad[2].y);
+      const dup = out.some(o => { let best = 1e9; for (let s = 0; s < 4; s++) { let dd = 0; for (let k = 0; k < 4; k++) dd = Math.max(dd, dist(o.quad[(k + s) % 4], c.quad[k])); best = Math.min(best, dd); } return best < diag * 0.04; });
+      if (!dup) out.push(c);
+      if (out.length >= 3) break;
+    }
+    return out;
+  }
+
+  function detectCard(img) { const c = detectCards(img); return c.length ? c[0] : null; }
 
   function solve(A, B) {
     const n = B.length;
@@ -300,42 +448,125 @@ const Engine = (() => {
     return out;
   }
 
+  const cornerMasks = {};
+  function cornerMask(w, h) {
+    const key = w + 'x' + h; if (cornerMasks[key]) return cornerMasks[key];
+    const m = new Uint8Array(w * h), r = w * 0.1, b = Math.max(1, Math.round(w * 0.02));
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      if (x < b || y < b || x >= w - b || y >= h - b) continue;
+      const cx = x < r ? r : x > w - 1 - r ? w - 1 - r : x, cy = y < r ? r : y > h - 1 - r ? h - 1 - r : y;
+      if ((x - cx) ** 2 + (y - cy) ** 2 <= r * r) m[y * w + x] = 1;
+    }
+    return (cornerMasks[key] = m);
+  }
+
   /** Vetor de comparação: RGB com balanço de branco, desfocado, normalizado. */
   function features(rgb, w, h) {
     const n = w * h, out = new Float32Array(n * 3);
     for (let c = 0; c < 3; c++) {
-      const ch = new Float32Array(n);
+      const ch = new Float32Array(n), tmp = new Float32Array(n);
       for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-        let s = 0, k = 0;
-        for (let dy = -1; dy <= 1; dy++) { const yy = y + dy; if (yy < 0 || yy >= h) continue;
-          for (let dx = -1; dx <= 1; dx++) { const xx = x + dx; if (xx < 0 || xx >= w) continue; s += rgb[(yy * w + xx) * 3 + c]; k++; } }
-        ch[y * w + x] = s / k;
+        const i = y * w + x; let s = rgb[i * 3 + c], k = 1;
+        if (x > 0) { s += rgb[(i - 1) * 3 + c]; k++; } if (x < w - 1) { s += rgb[(i + 1) * 3 + c]; k++; }
+        tmp[i] = s / k;
       }
-      const sorted = Array.from(ch).sort((a, b) => a - b);
-      const white = Math.max(sorted[Math.floor(n * 0.97)], 1);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const i = y * w + x; let s = tmp[i], k = 1;
+        if (y > 0) { s += tmp[i - w]; k++; } if (y < h - 1) { s += tmp[i + w]; k++; }
+        ch[i] = s / k;
+      }
+      // percentil 97 por histograma (bem mais rápido que ordenar)
+      const hist = new Uint32Array(256);
+      for (let i = 0; i < n; i++) { let v = ch[i] | 0; if (v > 255) v = 255; hist[v]++; }
+      let acc = 0, wv = 255; for (let t = 0; t < 256; t++) { acc += hist[t]; if (acc >= n * 0.97) { wv = t + 0.5; break; } }
+      const white = Math.max(wv, 1);
       for (let i = 0; i < n; i++) out[c * n + i] = Math.min(ch[i] / white, 1.1);
     }
-    let mean = 0; for (let i = 0; i < out.length; i++) mean += out[i]; mean /= out.length;
-    let sd = 0; for (let i = 0; i < out.length; i++) { out[i] -= mean; sd += out[i] * out[i]; }
-    sd = Math.sqrt(sd / out.length) || 1;
+    // fora dos cantos arredondados e da beirada aparece o fundo: não entra na comparação
+    const msk = cornerMask(w, h);
+    let mean = 0, cnt = 0;
+    for (let c = 0; c < 3; c++) for (let i = 0; i < n; i++) if (msk[i]) { mean += out[c * n + i]; cnt++; }
+    mean /= cnt || 1;
+    let sd = 0;
+    for (let c = 0; c < 3; c++) for (let i = 0; i < n; i++) { const k = c * n + i; if (msk[i]) { out[k] -= mean; sd += out[k] * out[k]; } else out[k] = 0; }
+    sd = Math.sqrt(sd / (cnt || 1)) || 1;
     for (let i = 0; i < out.length; i++) out[i] /= sd;
     return out;
   }
 
-  /** Compara com as 52 cartas, nas duas orientações (0° e 180°). */
-  function match(f, templates) {
+  /**
+   * Compara com as 52 cartas em 4 posições: normal, girada 180°, espelhada e espelhada+180°
+   * (a câmera da frente pode entregar a imagem espelhada).
+   * rot: 0 normal, 1 = 180°, 2 = espelho, 3 = espelho + 180°.
+   */
+  const mirrorMaps = {};
+  function mirrorMap(w, h) {
+    const k = w + 'x' + h; if (mirrorMaps[k]) return mirrorMaps[k];
+    const m = new Int32Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) m[y * w + x] = y * w + (w - 1 - x);
+    return (mirrorMaps[k] = m);
+  }
+  function match(f, templates, w, h) {
     const N = f.length, P = N / 3, res = [];
+    const mm = w && h ? mirrorMap(w, h) : null;
     for (const t of templates) {
-      const g = t.feat; let s0 = 0, s1 = 0;
+      const g = t.feat; let s0 = 0, s1 = 0, s2 = 0, s3 = 0;
       for (let c = 0; c < 3; c++) {
         const b = c * P;
-        for (let p = 0; p < P; p++) { const gv = g[b + p]; s0 += f[b + p] * gv; s1 += f[b + P - 1 - p] * gv; }
+        if (mm) for (let p = 0; p < P; p++) { const gv = g[b + p], q = mm[p]; s0 += f[b + p] * gv; s1 += f[b + P - 1 - p] * gv; s2 += f[b + q] * gv; s3 += f[b + P - 1 - q] * gv; }
+        else for (let p = 0; p < P; p++) { const gv = g[b + p]; s0 += f[b + p] * gv; s1 += f[b + P - 1 - p] * gv; }
       }
-      s0 /= N; s1 /= N;
-      res.push({ id: t.id, score: Math.max(s0, s1), rot: s1 > s0 });
+      const sc = [s0 / N, s1 / N, mm ? s2 / N : -9, mm ? s3 / N : -9];
+      let rot = 0; for (let k = 1; k < 4; k++) if (sc[k] > sc[rot]) rot = k;
+      res.push({ id: t.id, score: sc[rot], rot });
     }
     res.sort((a, b) => b.score - a.score);
     return { best: res[0], second: res[1], all: res };
+  }
+
+  /** Semelhança com UMA carta numa orientação (rot 0..3, como em match). */
+  function scoreOne(f, g, rot, w, h) {
+    const N = f.length, P = N / 3, mm = rot >= 2 ? mirrorMap(w, h) : null;
+    let s = 0;
+    for (let c = 0; c < 3; c++) {
+      const b = c * P;
+      for (let p = 0; p < P; p++) {
+        const q = rot === 0 ? p : rot === 1 ? P - 1 - p : rot === 2 ? mm[p] : P - 1 - mm[p];
+        s += f[b + q] * g[b + p];
+      }
+    }
+    return s / N;
+  }
+  /**
+   * Ajusta os 4 cantos usando a própria carta como régua: mexe cada canto um pouco
+   * e fica com a posição em que o recorte mais se parece com a carta guardada.
+   */
+  function refineQuadByMatch(img, quad, g, rot, w, h, opts_steps) {
+    let q = quad.map(p => ({ x: p.x, y: p.y }));
+    const ev = qq => scoreOne(features(warp(img, qq, w, h), w, h), g, rot, w, h);
+    let best = ev(q);
+    const short = Math.min(dist(q[0], q[1]), dist(q[1], q[2]));
+    for (const frac of (opts_steps || [0.08, 0.04, 0.02, 0.01])) {
+      const d = Math.max(0.5, short * frac);
+      for (let sweep = 0; sweep < 3; sweep++) {
+        let improved = false;
+        for (let k = 0; k < 4; k++) for (const [dx, dy] of [[d, 0], [-d, 0], [0, d], [0, -d]]) {
+          const t = q.map(p => ({ x: p.x, y: p.y })); t[k].x += dx; t[k].y += dy;
+          const sc = ev(t);
+          if (sc > best + 1e-4) { best = sc; q = t; improved = true; }
+        }
+        if (!improved) break;
+      }
+    }
+    return { quad: q, score: best };
+  }
+
+  /** Reordena os cantos para a posição da carta guardada (desfaz giro/espelho). */
+  function orient(q, rot) {
+    if (rot === 1) return [q[2], q[3], q[0], q[1]];
+    if (rot === 2) return [q[1], q[0], q[3], q[2]];
+    if (rot === 3) return [q[3], q[2], q[1], q[0]];
+    return q;
   }
 
   function sharpness(rgb, w, h) {
@@ -492,27 +723,34 @@ const Engine = (() => {
    * forte e cresce para os pontos fracos ligados a eles. A transparência de cada ponto vem da
    * escuridão real da tinta na foto (reproduz o traço como ele é).
    */
+  const tplCache = new WeakMap();
   function extractSignature(cap, tpl, W, H, opts) {
     opts = opts || {};
     if (!opts.noAlign) cap = alignToTemplate(cap, tpl, W, H);
     const n = W * H;
-    const tl = new Float32Array(n);
-    for (let i = 0; i < n; i++) tl[i] = 0.299 * tpl[i * 3] + 0.587 * tpl[i * 3 + 1] + 0.114 * tpl[i * 3 + 2];
-    const tmin = minFilter(tl, W, H, opts.r || 2);
-    // por canal: sobre áreas coloridas compara o canal mais forte da cor (ex.: o vermelho de um naipe de copas)
-    const tc = [0, 1, 2].map(c => { const a = new Float32Array(n); for (let i = 0; i < n; i++) a[i] = tpl[i * 3 + c]; return minFilter(a, W, H, opts.r || 2); });
-    const dom = new Uint8Array(n);
-    for (let i = 0; i < n; i++) { const r = tpl[i * 3], g = tpl[i * 3 + 1], b = tpl[i * 3 + 2]; dom[i] = r >= g && r >= b ? 0 : g >= b ? 1 : 2; }
-    // bordas do desenho (fora da estimativa de "papel")
-    const tb = boxSum(integral(tl, W, H), W, H, 1);
-    const edge = new Float32Array(n);
-    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
-      const i = y * W + x;
-      const gx = (tb[i - W + 1] + 2 * tb[i + 1] + tb[i + W + 1]) - (tb[i - W - 1] + 2 * tb[i - 1] + tb[i + W - 1]);
-      const gy = (tb[i + W - 1] + 2 * tb[i + W] + tb[i + W + 1]) - (tb[i - W - 1] + 2 * tb[i - W] + tb[i - W + 1]);
-      if (Math.abs(gx) + Math.abs(gy) > 9 * 70) edge[i] = 1;
+    // tudo o que depende só da carta guardada é calculado uma vez e reaproveitado
+    const cacheKey = (opts.r || 2) + ':' + W + 'x' + H;
+    let T = tplCache.get(tpl);
+    if (!T || T.key !== cacheKey) {
+      const tl = new Float32Array(n);
+      for (let i = 0; i < n; i++) tl[i] = 0.299 * tpl[i * 3] + 0.587 * tpl[i * 3 + 1] + 0.114 * tpl[i * 3 + 2];
+      const tmin = minFilter(tl, W, H, opts.r || 2);
+      const tc = [0, 1, 2].map(c => { const a = new Float32Array(n); for (let i = 0; i < n; i++) a[i] = tpl[i * 3 + c]; return minFilter(a, W, H, opts.r || 2); });
+      const dom = new Uint8Array(n);
+      for (let i = 0; i < n; i++) { const r = tpl[i * 3], g = tpl[i * 3 + 1], b = tpl[i * 3 + 2]; dom[i] = r >= g && r >= b ? 0 : g >= b ? 1 : 2; }
+      const tb = boxSum(integral(tl, W, H), W, H, 1);
+      const edge = new Float32Array(n);
+      for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+        const i = y * W + x;
+        const gx = (tb[i - W + 1] + 2 * tb[i + 1] + tb[i + W + 1]) - (tb[i - W - 1] + 2 * tb[i - 1] + tb[i + W - 1]);
+        const gy = (tb[i + W - 1] + 2 * tb[i + W] + tb[i + W + 1]) - (tb[i - W - 1] + 2 * tb[i - W] + tb[i - W + 1]);
+        if (Math.abs(gx) + Math.abs(gy) > 9 * 70) edge[i] = 1;
+      }
+      const edgeD = boxSum(integral(edge, W, H), W, H, 3);
+      T = { key: cacheKey, tl, tmin, tc, dom, edgeD };
+      tplCache.set(tpl, T);
     }
-    const edgeD = boxSum(integral(edge, W, H), W, H, 3);
+    const { tl, tmin, tc, dom, edgeD } = T;
     // --- dedo: detectado pela COR (pele), com o balanço de branco geral da foto ---
     const wb = [0, 0, 0];
     {
@@ -596,7 +834,7 @@ const Engine = (() => {
     const weakT = med - Math.max(0.035, 3 * sigma);
     const strongT = med - Math.max(0.09, 6 * sigma);
     // margem externa (fundo atrás da carta)
-    const m0 = Math.round(W * 0.015);
+    const m0 = Math.round(W * 0.008);
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (x < m0 || y < m0 || x >= W - m0 || y >= H - m0) { rs[y * W + x] = 9; ratio[y * W + x] = 9; }
     // histerese: começa na tinta forte e segue o traço pelas partes fracas
     // sobre áreas coloridas (naipes vermelhos, figuras) a câmera muda um pouco a cor: exige tinta mais escura
@@ -674,7 +912,7 @@ const Engine = (() => {
     return Math.min(ha / na, hb / nb);
   }
 
-  return { cardRect, detectCard, warp, features, match, sharpness, imageToRGB, templateFeatures, alignToTemplate, extractSignature, maskAgreement, homography };
+  return { cardRect, detectCard, detectCards, orient, refineQuadByMatch, scoreOne, snapQuad, warp, features, match, sharpness, imageToRGB, templateFeatures, alignToTemplate, extractSignature, maskAgreement, homography };
 })();
 if (typeof window !== 'undefined') window.Engine = Engine;
 
@@ -692,13 +930,10 @@ Engine.cropRefine = function (src, vw, vh, q, canvas, ctx) {
   const im = ctx.getImageData(0, 0, bw, bh);
   const local = q.map(p => ({ x: p.x - x0, y: p.y - y0 }));
   let quad = local;
-  const det = Engine.detectCard(im);
-  if (det) {
-    // casa os cantos novos com os antigos (mantém a orientação)
-    const c = det.quad; let best = 0, bd = 1e18;
-    for (let s = 0; s < 4; s++) { let dd = 0; for (let k = 0; k < 4; k++) { const a = c[(k + s) % 4], b = local[k]; dd += (a.x - b.x) ** 2 + (a.y - b.y) ** 2; } if (dd < bd) { bd = dd; best = s; } }
-    const diag = Math.hypot(bw, bh);
-    if (Math.sqrt(bd / 4) < diag * 0.06) quad = [0, 1, 2, 3].map(k => c[(k + best) % 4]);
-  }
+  // encosta os lados na borda real, agora em alta resolução (só um pequeno ajuste)
+  const n = bw * bh, L = new Float32Array(n), dd = im.data;
+  for (let i = 0, j = 0; i < n; i++, j += 4) L[i] = 0.299 * dd[j] + 0.587 * dd[j + 1] + 0.114 * dd[j + 2];
+  const sn = Engine.snapQuad(local, L, bw, bh, 0.025);
+  if (sn) quad = sn;
   return { im, quad };
 };

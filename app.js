@@ -23,6 +23,23 @@
   addEventListener('resize', layout);
   layout();
 
+  // pontinho logo abaixo da bateria (canto superior direito da barra de status)
+  function placeDot() {
+    const st = safeTopNow();
+    const top = st >= 50 ? st - 17 : st >= 44 ? st - 12 : st + 2;
+    dot.style.top = top + 'px'; dot.style.right = (innerWidth >= 420 ? 37 : 34) + 'px';
+    lbl.style.top = (top + 10) + 'px'; lbl.style.right = '20px';
+  }
+  function safeTopNow() {
+    const p = document.createElement('div');
+    p.style.cssText = 'position:fixed;top:0;height:env(safe-area-inset-top,0px);width:1px;visibility:hidden';
+    document.body.appendChild(p); const v = p.getBoundingClientRect().height; p.remove();
+    if (v >= 20) return v;
+    const h = Math.max(screen.height, screen.width);
+    return h >= 852 ? 59 : h >= 812 ? 47 : 20;
+  }
+  placeDot(); addEventListener('resize', placeDot);
+
   // ---------- sinais discretos ----------
   function setDot(mode, text) { dot.className = mode === 'off' ? '' : mode; lbl.textContent = text || ''; }
   function haptic() {
@@ -116,17 +133,17 @@
   async function startCapture() {
     clearTimeout(homeTimer);
     resetVisual();
-    home.classList.remove('on');
+    home.classList.add('on'); // o app fica na Tela de Início enquanto lê a carta
     $('rev').style.display = 'none';
     stopCamera();
     cap.reset();
     setDot('off');
-    hint.textContent = homeURL ? '' : 'sem print da Tela de Início';
+    hint.textContent = '';
     state = 'capture';
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } }
+        video: { facingMode: { ideal: 'user' }, width: { ideal: 1920 }, height: { ideal: 1080 } } // câmera da frente
       });
       video.srcObject = stream;
       await video.play();
@@ -149,7 +166,7 @@
     const I = cap.info;
     if (DEBUG) drawDebug();
     if (res) { finishCapture(res); return; }
-    setDot(I.phase === 'none' ? 'off' : 'seek');
+    setDot(I.phase === 'none' ? 'off' : 'seek', DEBUG && I.label ? I.label : '');
     loopTimer = setTimeout(loop, 40);
   }
 
@@ -161,18 +178,11 @@
     const faceURL = await composeFace(c, res.sig);
     await prepareCard(faceURL);
     hint.textContent = '';
-    setDot(res.quality === 'ok' ? 'ok' : 'part', c.label);
+    // câmera já desligada (travada): fica pronto para a carta aparecer
+    setDot(res.quality === 'ok' ? 'ok' : 'part', DEBUG ? c.label : '');
     haptic();
     if (DEBUG) { showReview(res, faceURL); return; }
     state = 'ready';
-    homeTimer = setTimeout(showHome, 2000);
-  }
-
-  function showHome() {
-    if (state !== 'ready') return;
-    setDot('off');
-    home.classList.add('on');
-    state = 'home';
   }
 
   // ---------- face: carta limpa + assinatura ----------
@@ -340,12 +350,16 @@
   document.addEventListener('touchend', e => {
     if (inPanel(e)) return;
     e.preventDefault();
+    const hadHold = !!holdTimer, hadCfg = !!cfgTimer;
     clearTimeout(holdTimer); holdTimer = null; clearTimeout(cfgTimer); cfgTimer = null;
     if (drag) { endDrag(); tStart = null; return; }
     if (!tStart) return;
     const t = e.changedTouches[0];
     const d = Math.hypot(t.clientX - tStart.x, t.clientY - tStart.y), dt = performance.now() - tStart.time;
     tStart = null;
+    // toque longo, mesmo se o cronômetro atrasou (o processamento da câmera ocupa o aparelho)
+    if (hadCfg && d < 15 && dt >= 1400) { openCfg(); return; }
+    if (hadHold && d < 15 && dt >= 1100) { startCapture(); return; }
     if (d < 20 && dt < 400) onTap(t.clientX, t.clientY);
   }, { passive: false });
 
@@ -366,8 +380,8 @@
 
   function onTap(x, y) {
     if (state === 'needtap') { startCapture(); return; }
-    if (state === 'review') { $('rev').style.display = 'none'; state = 'ready'; showHome(); return; }
-    if (state === 'ready' || state === 'home') { enter(); return; }
+    if (state === 'review') { $('rev').style.display = 'none'; state = 'ready'; return; }
+    if (state === 'ready') { enter(); return; }
     if (state === 'back' || state === 'face') {
       const now = performance.now();
       if (now - lastTap < 400 && Math.hypot(x - lastTapX, y - lastTapY) < 80) {

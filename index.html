@@ -21,6 +21,7 @@
   }
   #cam { position: fixed; left: 0; top: 0; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
   #stage { position: fixed; inset: 0; overflow: hidden; }
+  #hint { z-index: 5; color: rgba(255,255,255,.55) !important; }
 
   #card {
     position: absolute; left: 50%; top: 50%;
@@ -83,14 +84,14 @@
   #rev div.t { color: #0f0; font: 12px monospace; margin-top: 8px; white-space: pre-wrap; }
 
   #dot {
-    position: fixed; right: 16px; top: calc(env(safe-area-inset-top, 0px) + 10px);
-    width: 7px; height: 7px; border-radius: 50%; background: transparent; pointer-events: none;
+    position: fixed; right: 37px; top: 42px; z-index: 5;
+    width: 6px; height: 6px; border-radius: 50%; background: transparent; pointer-events: none;
   }
-  #dot.seek { background: #262626; }
-  #dot.ok { background: #2fd158; }
+  #dot.seek { background: rgba(255,255,255,.28); }
+  #dot.ok { background: #34c759; }
   #lbl {
-    position: fixed; right: 30px; top: calc(env(safe-area-inset-top, 0px) + 5px);
-    color: #4a4a4a; font-size: 12px; pointer-events: none;
+    position: fixed; right: 20px; top: 52px; z-index: 5;
+    color: rgba(255,255,255,.6); font-size: 11px; pointer-events: none;
   }
   #hint {
     position: fixed; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom, 0px) + 30px);
@@ -130,7 +131,7 @@
 <div id="dbg"><canvas id="dbgc"></canvas><div id="dbgt"></div></div>
 <div id="cfg">
   <h2>Ajustes</h2>
-  <p>Escolha o print da sua Tela de Início (tire o print neste mesmo iPhone). Ele aparece depois que a assinatura é lida.</p>
+  <p>Escolha o print da sua Tela de Início (tire o print neste mesmo iPhone). O app abre nele e lê a carta com a câmera da frente.</p>
   <img id="cfgimg" alt="">
   <label class="btn">Escolher print da Tela de Início<input id="cfgfile" type="file" accept="image/*"></label>
   <button class="btn sec" id="cfgdel">Remover print</button>
